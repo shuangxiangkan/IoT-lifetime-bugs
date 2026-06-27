@@ -29,7 +29,11 @@ from iot.resource_transfer import (
 )
 from iot.protocol import analyze_function_protocol
 from iot.semantics import IoTSemantics, load_iot_semantics
-from iot.wrappers import discover_ownership_sinks, discover_release_wrappers
+from iot.wrappers import (
+    discover_acquire_wrappers,
+    discover_ownership_sinks,
+    discover_release_wrappers,
+)
 
 
 def analyze_file(
@@ -65,11 +69,15 @@ def analyze_file(
         func["_source_bytes"] = source_bytes
 
     if discover_wrappers:
+        acquire_wrappers = discover_acquire_wrappers(functions, semantics)
         wrappers = discover_release_wrappers(functions, semantics)
         sinks = discover_ownership_sinks(functions, semantics)
-        if wrappers or sinks:
+        if wrappers or sinks or acquire_wrappers:
             semantics = semantics.augmented(
-                wrappers=wrappers, sinks=sinks, source_file=rel
+                wrappers=wrappers,
+                sinks=sinks,
+                acquire_wrappers=acquire_wrappers,
+                source_file=rel,
             )
 
     findings, warnings = _collect_findings(functions, source_bytes, rel, semantics)
@@ -202,15 +210,19 @@ def analyze_path(
         all_functions.extend(functions)
         selected_files += 1
 
+    acquire_wrappers = discover_acquire_wrappers(all_functions, semantics)
     wrappers = discover_release_wrappers(all_functions, semantics)
     sinks = discover_ownership_sinks(all_functions, semantics)
 
-    # Pass 2: run the finding producers with the wrapper/sink-augmented semantics.
+    # Pass 2: run the producers with the wrapper/sink/acquire-augmented semantics.
     for rel, source_bytes, functions in parsed:
         if not functions:
             continue
         file_semantics = semantics.augmented(
-            wrappers=wrappers, sinks=sinks, source_file=rel
+            wrappers=wrappers,
+            sinks=sinks,
+            acquire_wrappers=acquire_wrappers,
+            source_file=rel,
         )
         file_findings, file_warnings = _collect_findings(
             functions, source_bytes, rel, file_semantics
@@ -241,6 +253,9 @@ def analyze_path(
         "release_wrapper_specs": len(wrappers),
         "ownership_sinks": len({(s.name, s.scope_file) for s in sinks}),
         "ownership_sink_specs": len(sinks),
+        "acquire_wrappers": len(
+            {(next(iter(s.acquire_apis)), s.scope_file) for s in acquire_wrappers}
+        ),
         "excluded_test_files": excluded_test_files,
         "files_analyzed": files_analyzed,
         "functions_analyzed": functions_analyzed,

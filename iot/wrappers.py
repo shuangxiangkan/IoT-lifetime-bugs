@@ -17,10 +17,13 @@ applied to same-named functions in another translation unit.
 from dataclasses import dataclass
 import re
 
+import re as _re
+
 from analysis.controlflow import build_function_cfg
 from analysis.dataflow import analyze_forward
 from analysis.parsing import strip_casts
 from iot.calls import arg_at, find_c_calls, simple_name
+from iot.resource_state import ACTIVE, DECLARED_KIND
 from iot.semantics import IoTSemantics, ResourceSpec, SinkSpec
 
 
@@ -201,6 +204,96 @@ def _simple_assignment(text: str) -> tuple[str, str | None] | None:
 
 def _is_static(func: dict) -> bool:
     return bool(re.search(r"\bstatic\b", func.get("return_type", "")))
+
+
+# --- acquire-wrapper inference (dual of release-wrapper inference) -----------
+
+
+def discover_acquire_wrappers(
+    functions: list[dict], semantics: IoTSemantics
+) -> list[ResourceSpec]:
+    """Infer project-defined allocators that return a freshly-acquired resource.
+
+    A function that returns a variable still holding an ACTIVE owned resource
+    (e.g. ``void *my_alloc(n) { return malloc(n); }``) is treated as an acquire
+    API of that resource kind, so leaks of resources obtained through it are
+    tracked. Runs to a fixpoint so wrappers around wrappers are found.
+    """
+    discovered: list[ResourceSpec] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    while True:
+        added = False
+        for func in functions:
+            name = func.get("name")
+            if not name:
+                continue
+            source_file = func.get("_source_file")
+            current = semantics.augmented(
+                acquire_wrappers=discovered, source_file=source_file
+            )
+            kind = _returned_resource_kind(func, current)
+            if kind is None:
+                continue
+            scope_file = source_file if _is_static(func) else None
+            key = (name, kind, scope_file)
+            if key in seen:
+                continue
+            seen.add(key)
+            discovered.append(
+                ResourceSpec(
+                    kind=kind,
+                    acquire_apis=frozenset({name}),
+                    release_apis=frozenset(),
+                    acquire_result="return",
+                    platform="acquire_wrapper",
+                    scope_file=scope_file,
+                )
+            )
+            added = True
+        if not added:
+            return discovered
+
+
+def _returned_resource_kind(func: dict, semantics: IoTSemantics) -> str | None:
+    source_bytes = func.get("_source_bytes")
+    if source_bytes is None:
+        return None
+    from iot.resource_state import ResourceState, merge_resource_states
+    from iot.resource_transfer import refine_resource_edge, transfer_resource_node
+
+    cfg = build_function_cfg(func, source_bytes)
+    result = analyze_forward(
+        cfg,
+        ResourceState(),
+        lambda n, s: transfer_resource_node(n, s, semantics),
+        merge_resource_states,
+        edge_transfer=lambda e, s: refine_resource_edge(cfg, e, s, semantics),
+        max_iterations=max(1000, len(cfg.nodes) * 100),
+    )
+    for node in cfg.nodes:
+        if node.kind != "return" or node.id not in result.in_states:
+            continue
+        match = _re.match(r"^\s*return\s+(.+?)\s*;?\s*$", strip_casts(node.text).strip())
+        if not match:
+            continue
+        expr = match.group(1).strip()
+        # Case 1: ``return <acquire_call>(...);`` -- the acquire result is the
+        # return value, even without an intermediate variable.
+        for call in find_c_calls(expr):
+            spec = semantics.acquire_spec(call.name)
+            if (
+                spec is not None
+                and spec.acquire_result == "return"
+                and call.text.strip() == expr
+            ):
+                return spec.kind
+        # Case 2: ``return p;`` where p still holds an ACTIVE owned resource.
+        returned = simple_name(expr)
+        if returned:
+            res = result.in_states[node.id].get(returned)
+            if res is not None and res.state == ACTIVE and res.kind != DECLARED_KIND:
+                return res.kind
+    return None
 
 
 # --- ownership-sink inference (dual of release-wrapper inference) ------------

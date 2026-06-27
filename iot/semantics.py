@@ -177,10 +177,11 @@ class IoTSemantics:
         *,
         wrappers: "list[ResourceSpec]" = (),
         sinks: "list[SinkSpec]" = (),
+        acquire_wrappers: "list[ResourceSpec]" = (),
         source_file: str | None = None,
     ) -> "IoTSemantics":
         """Return a copy whose indexes also recognize project-inferred release
-        wrappers and ownership sinks.
+        wrappers, ownership sinks, and acquire wrappers.
 
         Both only extend lookups; the ``resources``/``locks`` tuples are
         unchanged, so leak-type overrides, success contracts, and
@@ -201,6 +202,12 @@ class IoTSemantics:
             if sink.scope_file is not None and sink.scope_file != source_file:
                 continue
             clone._sink_index[sink.name] = clone._sink_index.get(sink.name, ()) + (sink,)
+        for spec in acquire_wrappers:
+            if spec.scope_file is not None and spec.scope_file != source_file:
+                continue
+            for api in spec.acquire_apis:
+                # Do not shadow a real platform acquire API of the same name.
+                clone._acquire_index.setdefault(api, spec)
         return clone
 
     def with_release_wrappers(

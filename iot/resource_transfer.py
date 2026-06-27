@@ -22,7 +22,13 @@ from iot.calls import (
     find_c_calls,
     simple_name,
 )
-from iot.resource_state import RELEASED, ResourceState, merge_resource_states
+from iot.resource_state import (
+    ACTIVE,
+    DECLARED_KIND,
+    RELEASED,
+    ResourceState,
+    merge_resource_states,
+)
 from iot.semantics import IoTSemantics, NON_NEGATIVE
 
 
@@ -71,6 +77,7 @@ def analyze_function_resources(
     findings = _find_exit_leaks(func["name"], cfg, result, semantics)
     findings += _find_double_release(func["name"], cfg, result, semantics)
     findings += _find_use_after_release(func["name"], cfg, result, semantics)
+    findings += _find_owned_overwrite(func["name"], cfg, result, semantics)
     return ResourceAnalysis(cfg=cfg, dataflow=result, findings=findings)
 
 
@@ -743,11 +750,19 @@ def _find_use_after_release(
         if node.id not in result.in_states:
             continue
         in_state = result.in_states[node.id]
-        released = {
-            name for name, res in in_state.resources if res.state == RELEASED
+        released_canonical = {
+            name
+            for name, res in in_state.resources
+            if res.state == RELEASED and res.transition_api != "failed-acquire"
         }
-        if not released:
+        if not released_canonical:
             continue
+        # Include simple aliases that still resolve to a released resource, so
+        # ``q = p; free(p); use(q)`` is not missed.
+        released_names = set(released_canonical)
+        for alias, _target in in_state.aliases:
+            if in_state.resolve(alias) in released_canonical:
+                released_names.add(alias)
         text = strip_casts(
             node.condition if node.kind == "if" and node.condition else node.text
         )
@@ -760,7 +775,7 @@ def _find_use_after_release(
                 call, in_state, semantics
             )
             if rel is not None:
-                rereleased.add(rel[0])
+                rereleased.add(in_state.resolve(rel[0]))
 
         used: dict[str, str] = {}
         for call in calls:
@@ -768,13 +783,25 @@ def _find_use_after_release(
                 arg = _strip_value_cast(raw.strip())
                 if arg.startswith("&"):
                     continue  # &p is usually a re-init out-param, not a use
-                if arg in released and arg not in rereleased:
+                arg = simple_name(arg)
+                if (
+                    arg in released_names
+                    and in_state.resolve(arg) not in rereleased
+                ):
                     used.setdefault(arg, call.name)
-        for var in released:
-            if var in rereleased or var in used:
+        for var in released_names:
+            if in_state.resolve(var) in rereleased or var in used:
                 continue
             if _is_dereferenced(text, var):
                 used[var] = "dereference"
+        if node.kind == "return":
+            returned = _return_value(text)
+            returned = simple_name(_strip_value_cast(returned or ""))
+            if (
+                returned in released_names
+                and in_state.resolve(returned) not in rereleased
+            ):
+                used[returned] = "return"
 
         for var, how in used.items():
             resource = in_state.get(var)
@@ -782,7 +809,12 @@ def _find_use_after_release(
             if key in seen:
                 continue
             seen.add(key)
-            via = "dereferenced" if how == "dereference" else f"passed to {how}()"
+            if how == "dereference":
+                via = "dereferenced"
+            elif how == "return":
+                via = "returned after release"
+            else:
+                via = f"passed to {how}()"
             findings.append(
                 ResourceFinding(
                     type="use_after_release",
@@ -802,8 +834,118 @@ def _find_use_after_release(
 
 
 def _is_dereferenced(text: str, var: str) -> bool:
-    """True when ``var`` is dereferenced (``var->`` or ``var[``) in ``text``."""
-    return re.search(rf"\b{re.escape(var)}\s*(?:->|\[)", text) is not None
+    """True when ``var`` is dereferenced (``*var``, ``var->`` or ``var[``)."""
+    name = re.escape(var)
+    if re.search(rf"\b{name}\s*(?:->|\[)", text):
+        return True
+    # Require an expression boundary before ``*`` so a pointer declaration
+    # such as ``int *p`` is not mistaken for dereferencing p.
+    return re.search(rf"(?:^|[=,(;?:])\s*\*+\s*{name}\b", text) is not None
+
+
+def _find_owned_overwrite(
+    function: str,
+    cfg: ControlFlowGraph,
+    result: DataFlowResult,
+    semantics: IoTSemantics,
+) -> list[ResourceFinding]:
+    """Report an owned resource overwritten by a new acquisition before release.
+
+    ``p = malloc(8); p = malloc(16);`` and ``p = borrowed`` both lose the first
+    block. Return-value and out-parameter acquisitions are covered. Only a
+    definite ``ACTIVE`` prior value is flagged (not MIXED), so loop back-edge
+    reacquisition remains the loop check's job.
+    """
+    findings = []
+    seen: set[tuple[str, int, int | None]] = set()
+    for node in cfg.nodes:
+        if node.kind not in {"statement", "declaration", "if", "return"}:
+            continue
+        if node.id not in result.in_states:
+            continue
+        in_state = result.in_states[node.id]
+        text = strip_casts(
+            node.condition if node.kind == "if" and node.condition else node.text
+        )
+        reported: set[str] = set()
+
+        def report(var: str, new_api: str) -> None:
+            old = in_state.get(var)
+            if old is None or old.state != ACTIVE or old.kind == DECLARED_KIND:
+                return
+            # A previous iteration reaches the same source line; leave that to
+            # acquire_in_loop_without_release instead of double-reporting.
+            if old.line is None or old.line >= node.start_line:
+                return
+            canonical = in_state.resolve(var)
+            key = (canonical, node.start_line, old.line)
+            if key in seen:
+                return
+            seen.add(key)
+            reported.add(canonical)
+            findings.append(
+                ResourceFinding(
+                    type="owned_overwrite",
+                    function=function,
+                    line=node.start_line,
+                    variable=var,
+                    confidence="medium",
+                    detail=(
+                        f"IoT resource '{var}' ({old.kind}) acquired at line "
+                        f"{old.line} is overwritten by {new_api} at line "
+                        f"{node.start_line} without being released first"
+                    ),
+                    acquire_line=old.line,
+                    api_call=old.api,
+                )
+            )
+
+        protected_realloc: set[str] = set()
+        for call in find_c_calls(text):
+            spec = semantics.acquire_spec(call.name)
+            if spec is None:
+                continue
+            if spec.acquire_result == "arg":
+                var = arg_at(call, spec.acquire_arg)
+                if var:
+                    report(var, f"{call.name}()")
+                continue
+            var = assigned_variable_for_call(text, call)
+            if not var:
+                continue
+            lhs = assignment_lhs_for_call(text, call)
+            if lhs is not None and _is_escape_lvalue(lhs, in_state):
+                continue  # acquired into a field/global, not a plain local
+            # realloc(p, ...) conditionally replaces p while preserving the old
+            # allocation on failure; it needs dedicated semantics and is not an
+            # ordinary lost-handle overwrite.
+            realloc_arg = arg_at(call, 0) if call.name == "realloc" else None
+            if realloc_arg and in_state.resolve(realloc_arg) == in_state.resolve(var):
+                protected_realloc.add(in_state.resolve(var))
+                continue
+            report(var, f"a new {call.name}()")
+
+        plain = _plain_assignment(text)
+        if plain is not None:
+            var, rhs = plain
+            canonical = in_state.resolve(var)
+            if canonical not in reported and canonical not in protected_realloc:
+                rhs_name = simple_name(_strip_value_cast(rhs))
+                if rhs_name is None or in_state.resolve(rhs_name) != canonical:
+                    report(var, "a new value")
+    return findings
+
+
+def _plain_assignment(text: str) -> tuple[str, str] | None:
+    """Return a plain local ``(lhs, rhs)`` assignment, excluding comparisons."""
+    text = text.strip().rstrip(";")
+    if text.count("=") != 1 or _has_non_assignment_operator(text):
+        return None
+    left, right = text.split("=", 1)
+    if "->" in left or "." in left or "[" in left or _is_pointer_deref_lvalue(left):
+        return None
+    variable = _assigned_variable(left)
+    return (variable, right.strip()) if variable else None
 
 
 def _leak_type(kind: str) -> str:

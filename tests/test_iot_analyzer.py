@@ -443,6 +443,34 @@ class IoTAnalyzerTests(unittest.TestCase):
         )
         self.assertEqual(findings, [])
 
+    # --- inferred acquire wrappers --------------------------------------
+
+    def test_acquire_wrapper_is_discovered_across_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "alloc.c").write_text(
+                "void *project_alloc(void) { return malloc(8); }\n"
+            )
+            (root / "user.c").write_text(
+                "void victim(void) { void *p = project_alloc(); }\n"
+            )
+            result = analyze_path(root)
+        self.assertGreaterEqual(result["acquire_wrappers"], 1)
+        self.assertIn("victim", _functions_with(result, "memory_not_freed"))
+
+    def test_acquire_wrapper_fixpoint_handles_multiple_levels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "alloc_chain.c"
+            source.write_text(
+                "void *a0(void) { return malloc(8); }\n"
+                "void *a1(void) { return a0(); }\n"
+                "void *a2(void) { return a1(); }\n"
+                "void victim(void) { void *p = a2(); }\n"
+            )
+            result = analyze_path(source)
+        self.assertGreaterEqual(result["acquire_wrappers"], 3)
+        self.assertIn("victim", _functions_with(result, "memory_not_freed"))
+
     # --- use-after-release (use after free/close) ------------------------
 
     def test_use_after_free_passed_to_call(self):
@@ -465,6 +493,32 @@ class IoTAnalyzerTests(unittest.TestCase):
         )
         self.assertEqual([f.type for f in findings], ["use_after_release"])
 
+    def test_use_after_release_through_alias(self):
+        findings = _analyze_source(
+            "void f(void) { void *p = malloc(8); void *q = p; "
+            "free(p); use(q); }"
+        )
+        self.assertEqual([f.type for f in findings], ["use_after_release"])
+
+    def test_use_after_release_unary_dereference(self):
+        findings = _analyze_source(
+            "void f(void) { int *p = malloc(8); free(p); int x = *p; }"
+        )
+        self.assertEqual([f.type for f in findings], ["use_after_release"])
+
+    def test_returning_released_resource_is_flagged(self):
+        findings = _analyze_source(
+            "void *f(void) { void *p = malloc(8); free(p); return p; }"
+        )
+        self.assertEqual([f.type for f in findings], ["use_after_release"])
+
+    def test_returning_failed_acquire_value_is_not_use_after_release(self):
+        findings = _analyze_source(
+            "void *f(void) { void *p = malloc(8); "
+            "if (!p) return p; free(p); return 0; }"
+        )
+        self.assertNotIn("use_after_release", [f.type for f in findings])
+
     def test_reassigned_after_free_is_not_use_after_release(self):
         findings = _analyze_source(
             "void f(void) { void *p = malloc(8); free(p);\n"
@@ -485,6 +539,78 @@ class IoTAnalyzerTests(unittest.TestCase):
             "void f(void) { void *q = peek(); if (q) { use(q); } }"
         )
         self.assertEqual(findings, [])
+
+    # --- owned overwrite (lost handle) -----------------------------------
+
+    def test_owned_overwrite_leaks_first_acquisition(self):
+        findings = _analyze_source(
+            "void f(void) {\n"
+            "  void *p = malloc(8);\n"
+            "  p = malloc(16);\n"
+            "  free(p);\n}"
+        )
+        self.assertEqual([f.type for f in findings], ["owned_overwrite"])
+
+    def test_overwrite_after_release_is_not_flagged(self):
+        findings = _analyze_source(
+            "void f(void) {\n"
+            "  void *p = malloc(8);\n"
+            "  free(p);\n"
+            "  p = malloc(16);\n"
+            "  free(p);\n}"
+        )
+        self.assertEqual(findings, [])
+
+    def test_overwrite_after_escape_is_not_flagged(self):
+        findings = _analyze_source(
+            "struct C { void *b; };\n"
+            "void f(struct C *c) {\n"
+            "  void *p = malloc(8);\n"
+            "  c->b = p;\n"
+            "  p = malloc(16);\n"
+            "  free(p);\n}"
+        )
+        self.assertEqual(findings, [])
+
+    def test_owned_overwrite_by_borrowed_value(self):
+        findings = _analyze_source(
+            "void f(void *borrowed) {\n"
+            "  void *p = malloc(8);\n"
+            "  p = borrowed;\n"
+            "}"
+        )
+        self.assertEqual([f.type for f in findings], ["owned_overwrite"])
+
+    def test_out_parameter_acquire_overwrites_owned_handle(self):
+        findings = _analyze_source(
+            "void f(void) {\n"
+            "  void *task;\n"
+            "  xTaskCreate(0,0,0,0,0,&task);\n"
+            "  xTaskCreate(0,0,0,0,0,&task);\n"
+            "}"
+        )
+        self.assertIn("owned_overwrite", [f.type for f in findings])
+
+    def test_realloc_self_update_is_not_owned_overwrite(self):
+        findings = _analyze_source(
+            "void f(void) {\n"
+            "  void *p = malloc(8);\n"
+            "  p = realloc(p, 16);\n"
+            "  free(p);\n"
+            "}"
+        )
+        self.assertNotIn("owned_overwrite", [f.type for f in findings])
+
+    def test_loop_reacquire_is_not_owned_overwrite(self):
+        # A loop re-acquiring into the same variable is acquire_in_loop's job;
+        # it must not also be reported as a sequential owned_overwrite.
+        result = self._loop_findings(
+            "void f(int n) { int i; void *p = 0;\n"
+            "  for (i = 0; i < n; i++) { p = malloc(8); use(p); } }"
+        )
+        self.assertEqual(
+            _functions_with(result, "owned_overwrite"), set()
+        )
 
     # --- P2: protocol-order (typestate) ----------------------------------
 

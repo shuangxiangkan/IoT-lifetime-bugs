@@ -1,0 +1,41 @@
+{
+  "platform": "lwip",
+  "resources": [
+    {
+      "kind": "lwip_pbuf",
+      "leak_type": "packet_buffer_not_freed",
+      "acquire": ["pbuf_alloc", "pbuf_alloc_reference", "pbuf_clone"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["pbuf_free"],
+      "release_arg": 0
+    },
+    {
+      "kind": "lwip_netbuf",
+      "leak_type": "netbuf_not_freed",
+      "acquire": ["netbuf_new"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["netbuf_delete", "netbuf_free"],
+      "release_arg": 0
+    },
+    {
+      "kind": "lwip_tcp_pcb",
+      "leak_type": "tcp_pcb_not_freed",
+      "acquire": ["tcp_new", "tcp_new_ip_type"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["tcp_close", "tcp_abort"],
+      "release_arg": 0
+    },
+    {
+      "kind": "lwip_socket",
+      "leak_type": "socket_not_closed",
+      "acquire": ["lwip_socket", "lwip_accept"],
+      "acquire_result": "return",
+      "success": "non_negative",
+      "release": ["lwip_close"],
+      "release_arg": 0
+    }
+  ]
+}

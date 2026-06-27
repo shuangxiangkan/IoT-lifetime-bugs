@@ -1,0 +1,22 @@
+{
+  "platform": "paho_mqtt",
+  "protocols": [
+    {
+      "kind": "mqtt_client",
+      "create": ["MQTTClient_create"],
+      "create_result": "arg",
+      "create_arg": 0,
+      "initial_state": "created",
+      "transitions": [
+        {"api": "MQTTClient_connect", "arg": 0, "from": ["created", "disconnected"], "to": "connected"},
+        {"api": "MQTTClient_publishMessage", "arg": 0, "from": ["connected"], "to": "connected"},
+        {"api": "MQTTClient_publish", "arg": 0, "from": ["connected"], "to": "connected"},
+        {"api": "MQTTClient_subscribe", "arg": 0, "from": ["connected"], "to": "connected"},
+        {"api": "MQTTClient_subscribeMany", "arg": 0, "from": ["connected"], "to": "connected"},
+        {"api": "MQTTClient_unsubscribe", "arg": 0, "from": ["connected"], "to": "connected"},
+        {"api": "MQTTClient_disconnect", "arg": 0, "from": ["connected"], "to": "disconnected"},
+        {"api": "MQTTClient_destroy", "arg": 0, "from": ["created", "connected", "disconnected"], "to": "destroyed"}
+      ]
+    }
+  ]
+}

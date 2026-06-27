@@ -1,0 +1,52 @@
+{
+  "platform": "posix",
+  "resources": [
+    {
+      "kind": "heap_memory",
+      "leak_type": "memory_not_freed",
+      "acquire": ["malloc", "calloc", "realloc", "strdup", "strndup"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["free"],
+      "release_arg": 0
+    },
+    {
+      "kind": "file_stream",
+      "leak_type": "file_not_closed",
+      "acquire": ["fopen", "fdopen", "freopen", "tmpfile"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["fclose"],
+      "release_arg": 0
+    },
+    {
+      "kind": "file_descriptor",
+      "leak_type": "fd_not_closed",
+      "acquire": ["open", "creat", "dup", "dup2"],
+      "acquire_result": "return",
+      "success": "non_negative",
+      "release": ["close"],
+      "release_arg": 0
+    },
+    {
+      "kind": "socket",
+      "leak_type": "socket_not_closed",
+      "acquire": ["socket", "accept", "accept4"],
+      "acquire_result": "return",
+      "success": "non_negative",
+      "release": ["close", "closesocket"],
+      "release_arg": 0
+    }
+  ],
+  "locks": [
+    {
+      "kind": "pthread_mutex",
+      "leak_type": "lock_not_released_on_path",
+      "acquire": ["pthread_mutex_lock", "pthread_mutex_trylock"],
+      "acquire_arg": 0,
+      "success": "zero",
+      "release": ["pthread_mutex_unlock"],
+      "release_arg": 0
+    }
+  ]
+}

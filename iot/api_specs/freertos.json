@@ -1,0 +1,53 @@
+{
+  "platform": "freertos",
+  "resources": [
+    {
+      "kind": "freertos_queue",
+      "leak_type": "queue_not_deleted",
+      "acquire": ["xQueueCreate", "xQueueCreateStatic"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["vQueueDelete"],
+      "release_arg": 0
+    },
+    {
+      "kind": "freertos_task",
+      "leak_type": "task_not_deleted",
+      "acquire": ["xTaskCreateStatic"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["vTaskDelete"],
+      "release_arg": 0
+    },
+    {
+      "kind": "freertos_task",
+      "leak_type": "task_not_deleted",
+      "acquire": ["xTaskCreate"],
+      "acquire_result": "arg",
+      "acquire_arg": 5,
+      "success": "nonzero",
+      "release": ["vTaskDelete"],
+      "release_arg": 0
+    },
+    {
+      "kind": "freertos_timer",
+      "leak_type": "timer_not_deleted",
+      "acquire": ["xTimerCreate"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["xTimerDelete"],
+      "release_arg": 0
+    }
+  ],
+  "locks": [
+    {
+      "kind": "freertos_mutex",
+      "leak_type": "lock_not_released_on_path",
+      "acquire": ["xSemaphoreTake", "xSemaphoreTakeRecursive"],
+      "acquire_arg": 0,
+      "success": "nonzero",
+      "release": ["xSemaphoreGive", "xSemaphoreGiveRecursive"],
+      "release_arg": 0
+    }
+  ]
+}

@@ -22,19 +22,21 @@
 - `<resource>_not_released_on_path` —— 资源在某条真实路径上到达函数出口仍未释放
   （按资源类型命名，如内存、文件、文件描述符、socket、数据包缓冲、队列、任务、定时器…）
 - `double_release` —— 同一资源在某路径上被释放两次
-- `use_after_release` —— 释放后又被使用（传给其它调用，或经 `->`/`[]` 解引用）
+- `use_after_release` —— 释放后又被使用（传给调用、`*p`/`->`/`[]` 解引用或返回）
+- `owned_overwrite` —— active resource 尚未释放，保存它的 handle 已被新值覆盖
 - `lock_not_released_on_path` —— 锁在某条退出路径上未释放
 - `acquire_in_loop_without_release` —— 循环内反复申请、循环体内无释放（重连耗尽型）
 
 **2. 协议顺序（typestate）**（对象需按状态机顺序使用，如 init → start → stop → destroy）：
 
-- `invalid_protocol_transition` —— API 用在对象不合法的协议状态上（如未连接就发送、
-  销毁后再用、未初始化就使用）。引擎通用、不绑定任何具体库，默认不带协议规格，由用户
-  按需喂入。
+- `invalid_protocol_transition` —— 已被 create/init 跟踪的对象处于不合法状态时调用 API，
+  例如未 connect 就 publish 或 destroy 后继续使用。引擎通用、不绑定具体库，默认不加载
+  协议规格，由用户按需提供。
 
 为降低误报，分析器会自动识别常见的“非泄漏”写法并豁免：所有权逃逸（存入字段/全局/
 出参）、返回给调用方、申请失败分支（`p == NULL` / fd `< 0`）、`if (p) { ... 释放 ... }`
-守卫，以及项目自定义的释放包装函数和所有权接管函数（均从代码结构自动推断，无需配置）。
+守卫。它还会从项目代码中自动推断 acquire wrapper、release wrapper 和 ownership sink，
+并通过项目级 fixpoint 传播多层包装，无需为单个项目编写规则。
 
 尚未覆盖、刻意留给下游（大模型/人工）的复杂情形见 [TODO.md](TODO.md)，包括引用计数语义、
 跨函数所有权、条件所有权转移与并发/中断生命周期。
@@ -54,11 +56,17 @@ python IoT-lifetime-bugs/cli.py lifetime path/to/project > iot_findings.json
 # 只用指定平台规格
 python IoT-lifetime-bugs/cli.py lifetime path/to/project \
     --api-specs IoT-lifetime-bugs/iot/api_specs/lwip.json
+
+# 加载用户提供的 typestate/API 规格，并包含 test/doc/example 目录
+python IoT-lifetime-bugs/cli.py lifetime path/to/project \
+    --api-specs path/to/custom_specs.json --include-tests
 ```
 
 子命令可省略：`python IoT-lifetime-bugs/cli.py path/to/project` 等价。
 输出为 JSON，含 `findings`、按类型/置信度的 `summary`、加载的 `platforms`
-和 `warnings`。
+和 `warnings`，以及自动推断的 acquire/release wrapper、ownership sink 和被排除
+测试文件的统计。默认跳过 `test/tests/doc/docs/example/examples/sample/samples/demo`
+等子目录；直接扫描某个测试文件或使用 `--include-tests` 时不会跳过。
 
 ## 核心思想
 
@@ -121,7 +129,7 @@ IoT API resource and protocol semantics
 JSON candidate findings
 ```
 
-计划中的目录结构如下：
+当前目录结构如下：
 
 ```text
 IoT-lifetime-bugs/
@@ -129,7 +137,11 @@ IoT-lifetime-bugs/
 ├── iot/
 │   ├── resource_state.py     # 资源状态与路径合并
 │   ├── resource_transfer.py  # acquire/release/handoff 规则
+│   ├── wrappers.py           # acquire/release wrapper 与 sink 推断
+│   ├── semantics.py          # JSON 规格加载与索引
+│   ├── calls.py              # C 调用和参数规范化
 │   ├── protocol_state.py     # API typestate/调用顺序
+│   ├── protocol.py           # 路径敏感协议分析
 │   ├── analyzer.py           # 分析调度与结果生成
 │   └── api_specs/            # 各 IoT 平台的数据驱动 API 规格
 ├── tests/
@@ -142,26 +154,29 @@ lwIP、FreeRTOS 或厂商 SDK 的规则写死在通用分析层中。
 
 ## 数据驱动的 API 语义
 
-不同 IoT 平台使用不同的资源 API。项目将使用 JSON 规格描述资源类型、申请函数、
+不同 IoT 平台使用不同的资源 API。项目使用 JSON 规格描述资源类型、申请函数、
 释放函数、参数位置、成功条件和所有权转移规则。例如：
 
 ```json
 {
-  "resource": "lwip_pbuf",
-  "acquire": {
-    "api": "pbuf_alloc",
-    "result": "return",
-    "success": "non_null"
-  },
-  "release": {
-    "api": "pbuf_free",
-    "resource_arg": 0
-  }
+  "platform": "lwip",
+  "resources": [
+    {
+      "kind": "lwip_pbuf",
+      "leak_type": "packet_buffer_not_freed",
+      "acquire": ["pbuf_alloc"],
+      "acquire_result": "return",
+      "success": "non_null",
+      "release": ["pbuf_free"],
+      "release_arg": 0
+    }
+  ]
 }
 ```
 
 这样，扩展一个新平台主要是增加或修正 API 规格，而不需要修改 CFG 和数据流引擎。
-第一阶段计划覆盖 POSIX socket、lwIP、FreeRTOS、Zephyr 和 ESP-IDF/MQTT。
+当前内置 POSIX、lwIP 和 FreeRTOS 资源规格。库专属协议状态机不默认内置，避免分析器
+绑定特定项目；可通过 `--api-specs` 加载。
 
 ## 资源状态与路径分析
 
@@ -172,7 +187,6 @@ declared
 active
 released
 escaped
-unknown
 mixed
 ```
 
@@ -203,32 +217,32 @@ return 0;
 uninitialized → initialized → started → stopped → destroyed
 ```
 
-因此项目还计划支持 typestate 分析，用状态机描述合法 API 转移，检测：
+项目通过可选 typestate 规格描述合法 API 转移并检测：
 
-- 未停止 client 就销毁；
-- 尚未初始化就启动或发送；
+- 已跟踪对象尚未 connect/start 就发送；
 - 已销毁对象再次使用；
-- 重复初始化但没有释放旧资源；
 - 错误路径破坏协议状态。
 
-资源分析回答“有没有释放”，协议状态分析回答“是否以正确顺序使用”。
+状态在 CFG 合流处发生冲突时降为 `UNKNOWN` 并停止报告；非法调用后也降为 `UNKNOWN`，
+避免级联候选。未被 create/init 跟踪的对象不会武断报告。资源分析回答“有没有释放”，
+协议状态分析回答“已知状态下是否按正确顺序使用”。
 
-## 预期检查项
+## 当前检查项
 
-第一阶段聚焦函数内、路径敏感且能够较可靠识别的问题：
+当前聚焦函数内、路径敏感且适合粗筛的问题：
 
-- `resource_not_released_on_path`
-- `missing_cleanup_on_error_path`
+- `<resource>_not_released_on_path`
 - `double_release`
 - `use_after_release`
+- `owned_overwrite`
 - `acquire_in_loop_without_release`
 - `lock_not_released_on_path`
 - `packet_buffer_not_freed`
 - `socket_not_closed`
-- `network_client_not_destroyed`
 - `invalid_protocol_transition`
 
-后续再逐步加入函数摘要、有限函数间传播、编译配置感知和网络事件上下文分析。
+跨函数部分目前通过结构化摘要覆盖 acquire wrapper、release wrapper 和 ownership sink；
+复杂条件所有权、完整跨过程指针分析、编译配置和网络事件上下文不属于当前主线。
 
 ## 研究目标
 
@@ -245,5 +259,6 @@ uninitialized → initialized → started → stopped → destroyed
 ## 边界
 
 `IoT-lifetime-bugs` 输出的是值得进一步检查的候选缺陷，不是完整的正确性证明。
-复杂宏、函数指针、跨任务所有权、完整 C++ RAII、项目自定义封装和并发执行仍可能
-需要更深的函数间分析、动态实验或人工判断。
+复杂宏、函数指针、条件所有权、跨任务/中断所有权、完整 C++ RAII、并发执行和复杂
+别名仍可能产生漏报或误报，需要下游大模型、动态实验或人工判断。项目刻意保持通用
+粗筛边界，不加入针对某个仓库或函数名的硬编码规则。

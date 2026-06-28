@@ -601,6 +601,19 @@ class IoTAnalyzerTests(unittest.TestCase):
         )
         self.assertNotIn("owned_overwrite", [f.type for f in findings])
 
+    def test_assigning_null_is_not_owned_overwrite(self):
+        # `p = NULL;` is defensive clearing (almost always right after a free,
+        # often through a custom free wrapper the inference did not catch). It
+        # must not be flagged as a lost-handle overwrite -- this was a large
+        # false-positive source on real SDKs (e.g. `free_wrapper(x); x = NULL;`).
+        findings = _analyze_source(
+            "void f(void) {\n"
+            "  void *p = malloc(8);\n"
+            "  some_free(p);\n"
+            "  p = NULL;\n}"
+        )
+        self.assertNotIn("owned_overwrite", {f.type for f in findings})
+
     def test_loop_reacquire_is_not_owned_overwrite(self):
         # A loop re-acquiring into the same variable is acquire_in_loop's job;
         # it must not also be reported as a sequential owned_overwrite.

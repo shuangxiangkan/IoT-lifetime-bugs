@@ -930,9 +930,15 @@ def _find_owned_overwrite(
             var, rhs = plain
             canonical = in_state.resolve(var)
             if canonical not in reported and canonical not in protected_realloc:
-                rhs_name = simple_name(_strip_value_cast(rhs))
-                if rhs_name is None or in_state.resolve(rhs_name) != canonical:
-                    report(var, "a new value")
+                rhs_stripped = _strip_value_cast(rhs).strip()
+                # Assigning NULL/0 is defensive clearing -- almost always right
+                # after the resource was freed (often through a custom free
+                # wrapper the inference did not catch) -- not a lost-handle
+                # overwrite by a new owned value. Do not flag it.
+                if rhs_stripped not in {"NULL", "0", "nullptr"}:
+                    rhs_name = simple_name(rhs_stripped)
+                    if rhs_name is None or in_state.resolve(rhs_name) != canonical:
+                        report(var, "a new value")
     return findings
 
 

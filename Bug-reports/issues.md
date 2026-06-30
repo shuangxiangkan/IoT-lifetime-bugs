@@ -12,3 +12,6 @@
 
 ## azure-iot-sdk-c
  - https://github.com/Azure/azure-iot-sdk-c/issues/2734
+
+## esp-idf
+ - https://github.com/espressif/esp-idf/issues/18776

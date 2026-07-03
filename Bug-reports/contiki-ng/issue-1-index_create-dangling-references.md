@@ -1,4 +1,4 @@
-# Antelope `index_create()`: use-after-free and dangling references on `storage_put_index()` failure path
+# Antelope `index_create()`: stale attribute and list references after `storage_put_index()` failure
 
 ## Summary
 
@@ -6,10 +6,9 @@ In `os/storage/antelope/index.c`, `index_create()` publishes the freshly allocat
 `index_t` to both the owning attribute (`attr->index`) and the global `indices`
 list **before** the last fallible initialization step (`storage_put_index()`).
 When that step fails, the error path frees the `index_memb` pool slot but does
-**not** roll back the two references it already published, and it reads a field
-of the freed object in the log statement. This leaves a use-after-free read plus
-two dangling references to a pool slot that is immediately returned to the
-allocator.
+**not** roll back the two references it already published. The attribute and
+global list consequently retain pointers to a slot that has been returned to
+the allocator and can be reused by a later `memb_alloc()`.
 
 ## Affected code
 
@@ -24,7 +23,7 @@ allocator.
     api->destroy(index);
     memb_free(&index_memb, index);              /* slot returned to pool */
     PRINTF("DB: Failed to store index data in file \"%s\"\n",
-           index->descriptor_file);             /* read of freed object  */
+           index->descriptor_file);             /* access after pool release */
     return DB_INDEX_ERROR;                       /* attr->index and indices
                                                     still point to the slot */
   }
@@ -32,26 +31,29 @@ allocator.
 
 ## Problems
 
-The failure path leaves three defects, all because the object was published
-before `storage_put_index()` could fail:
+The failure path leaves two persistent stale references because the object was
+published before `storage_put_index()` could fail:
 
-1. **Use-after-free read.** `index->descriptor_file` is read in the `PRINTF`
-   *after* `memb_free(&index_memb, index)`. `memb_free()` does not clear the
-   block, so on a single-threaded run the data is usually still intact, but the
-   slot is formally released and may be re-allocated/overwritten by the next
-   `memb_alloc()` (e.g. from an interrupting protothread). This is a latent UAF.
-
-2. **Dangling `attr->index`.** `attr->index = index` is never reset to `NULL` on
+1. **Stale `attr->index`.** `attr->index = index` is never reset to `NULL` on
    this path, so the attribute keeps pointing at a freed pool slot. Consequences:
    - The guard at the top of `index_create()` (`if(attr->index != NULL) ... already indexed`)
      wrongly believes the attribute already has an index.
-   - Query paths dereference `attr->index->api` on a freed object.
-   - A later `index_destroy()`/`index_release()` would free the same slot again
-     (double free).
+   - Insert and query paths can use an index whose backend resources have already
+     been destroyed.
+   - If the pool slot is reused, the old attribute can silently refer to a
+     different index object.
 
-3. **Dangling global `indices` entry.** `list_push(indices, index)` is never
+2. **Stale global `indices` entry.** `list_push(indices, index)` is never
    matched by a `list_remove(indices, index)`, so any traversal of the global
-   `indices` list visits a freed slot.
+   `indices` list visits a slot that the pool considers free. A later allocation
+   may overwrite that slot while it is still linked into the list.
+
+The log statement also accesses `index->descriptor_file` after returning the
+slot to `index_memb`. Contiki-NG's `memb_free()` only clears the pool's
+allocation bitmap; it does not release or clear the static backing storage.
+Therefore this is not a conventional heap use-after-free, but the access is
+poorly ordered and relies on data in a slot that is no longer owned by
+`index_create()`.
 
 The intended cleanup ordering is visible in `index_release()`:
 
@@ -65,75 +67,10 @@ The failure path in `index_create()` skips the first two steps.
 
 ## Trigger condition
 
-The index backend creates successfully (`api->create()` returns OK) but the
-descriptor persistence fails (`storage_put_index()` returns an error). Realistic
-causes: storage write error, full backing store, corrupted/short descriptor
-file, or a vendor storage backend returning failure.
+The index backend creates successfully (`api->create()` returns OK), sets a
+non-empty `descriptor_file`, but descriptor persistence fails
+(`storage_put_index()` returns an error). With the built-in components this
+principally affects max-heap indexes; inline indexes leave `descriptor_file`
+empty and skip this call. Realistic causes include failure to open the relation
+metadata file, a full backing store, or a failed/short metadata write.
 
-## Impact
-
-- Use-after-free read of the descriptor filename.
-- Dangling `attr->index` → stale/incorrect "already indexed" state and
-  dereference of a freed object from query paths.
-- Dangling global `indices` list node.
-- Potential double free of the same `index_memb` slot via a later release.
-- Pool slot may be re-used while old references still point at it, corrupting the
-  global list and query results.
-
-On a fixed-size pool (`MEMB(index_memb, index_t, DB_MAX_INDEXES)`) the corruption
-is stable and reproducible once the failing descriptor store is hit.
-
-## Suggested fix
-
-Preferred: publish the object only after every fallible step has succeeded
-(persist the descriptor first, then assign `attr->index` and `list_push`):
-
-```c
-  if(index->descriptor_file[0] != '\0' &&
-     DB_ERROR(storage_put_index(index))) {
-    char descriptor_file[DB_MAX_FILENAME_LENGTH];
-
-    strncpy(descriptor_file, index->descriptor_file, sizeof(descriptor_file));
-    descriptor_file[sizeof(descriptor_file) - 1] = '\0';
-
-    api->destroy(index);
-    memb_free(&index_memb, index);
-
-    PRINTF("DB: Failed to store index data in file \"%s\"\n", descriptor_file);
-    return DB_INDEX_ERROR;
-  }
-
-  attr->index = index;
-  list_push(indices, index);
-```
-
-Alternative (keep current publish order, but fully roll back and copy the
-filename before freeing):
-
-```c
-  if(index->descriptor_file[0] != '\0' &&
-     DB_ERROR(storage_put_index(index))) {
-    char descriptor_file[DB_MAX_FILENAME_LENGTH];
-
-    strncpy(descriptor_file, index->descriptor_file, sizeof(descriptor_file));
-    descriptor_file[sizeof(descriptor_file) - 1] = '\0';
-
-    attr->index = NULL;
-    list_remove(indices, index);
-    api->destroy(index);
-    memb_free(&index_memb, index);
-
-    PRINTF("DB: Failed to store index data in file \"%s\"\n", descriptor_file);
-    return DB_INDEX_ERROR;
-  }
-```
-
-## Suggested verification (fault injection)
-
-1. Let `memb_alloc()` and `api->create()` succeed.
-2. Force `storage_put_index()` to return an error.
-3. Assert `attr->index == NULL`.
-4. Assert the global `indices` list does not contain the freed address.
-5. Assert `memb_numfree(&index_memb)` is restored to the pre-call value.
-6. Create an index again and confirm the slot is safely re-usable.
-7. Run under ASan / pool poisoning to confirm no read of the freed object.

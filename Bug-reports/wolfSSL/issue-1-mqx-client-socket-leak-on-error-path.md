@@ -63,9 +63,3 @@ When address parsing or `connect()` fails after the socket is created, the socke
 #### Actual results
 
 The error paths `goto end`, skipping `socket_cleanup: close(sockfd)`, so the socket is leaked. Repeating the failing path (e.g. in a task or test loop) accumulates open descriptors.
-
-#### Versions
-
-Source-level issue in `IDE/MQX/client-tls.c`.
-
-I have not tied this to a specific build or platform. Please let me know if a concrete version string or a runtime reproducer is required.

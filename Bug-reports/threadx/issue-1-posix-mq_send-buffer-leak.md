@@ -36,8 +36,6 @@ consumes space in that queue's byte pool.
     return(OK);
 ```
 
-## Problem
-
 On the success path, the buffer's ownership transfers to the queue, and the
 receiver frees it (`tx_byte_release()`) after dequeuing the message. On the
 `tx_queue_send()` failure path:
@@ -48,7 +46,6 @@ receiver frees it (`tx_byte_release()`) after dequeuing the message. On the
 
 Each failure permanently consumes one allocation in `q_ptr->vq_message_area`.
 
-## Trigger condition
 
 `tx_queue_send()` can return a non-success status (e.g. queue pointer/state
 error, or an aborted wait). The code uses `TX_WAIT_FOREVER` so a full queue does
@@ -76,15 +73,3 @@ Release the not-yet-transferred copy before returning:
 The `tx_byte_release()` return value may be checked, but even on release failure
 the original `tx_queue_send()` error semantics should be preserved.
 
-## Note (separate robustness issue, out of scope)
-
-Earlier in the same function, when `tx_byte_allocate()` fails the code calls
-`posix_internal_error(9999)` and then continues to use `bp` anyway (copying into
-it and posting it). That is an independent defect not covered by this report, but
-worth addressing in the same area.
-
-## Suggested verification
-
-Stub `tx_byte_allocate()` to succeed and `tx_queue_send()` to fail. Verify
-`tx_byte_release()` is called exactly once with `bp`. Loop the failing path and
-confirm the queue byte pool's available bytes stop decreasing.

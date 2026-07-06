@@ -2,7 +2,7 @@
  - https://github.com/RIOT-OS/RIOT/issues/22422  confirmed
 
 ## mosquitto
- - https://github.com/eclipse-mosquitto/mosquitto/issues/3678
+ - https://github.com/eclipse-mosquitto/mosquitto/issues/3678 fixed
 
 ## paho.mqtt.c
  - https://github.com/eclipse-paho/paho.mqtt.c/issues/1681
@@ -20,7 +20,7 @@
  - https://github.com/contiki-ng/contiki-ng/issues/3182  issue-1
 
 ## zephyr
- - https://github.com/zephyrproject-rtos/zephyr/issues/112653 issue-1
+ - https://github.com/zephyrproject-rtos/zephyr/issues/112653 issue-1 confirmed
 
 ## threadx
  - https://github.com/eclipse-threadx/threadx/issues/568 issue-1

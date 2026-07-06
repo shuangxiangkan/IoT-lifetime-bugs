@@ -1,4 +1,4 @@
-# Renesas SH2A_FPU port: FPU context buffer leaked on task deletion (no `portCLEAN_UP_TCB`)
+# POSIX port ignores TLS initialization failures, causing thread misclassification and a memory leak
 
 ## Summary
 

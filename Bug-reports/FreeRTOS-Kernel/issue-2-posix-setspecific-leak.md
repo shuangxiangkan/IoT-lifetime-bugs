@@ -85,13 +85,3 @@ unmarked, which may lead to incorrect later control flow.
 - `pthread_key_create()`'s return value is also ignored; if key creation fails,
   `pthread_setspecific()` will subsequently fail. A complete fix should save and
   check the key initialization status.
-
-## Suggested test
-
-Use a wrapper or link-time substitution to make `pthread_setspecific()` return
-`ENOMEM`, and verify:
-
-- `pucThreadData` is freed.
-- The thread is not treated as successfully marked.
-- No double free occurs.
-- The normal path still frees exactly once via the destructor on thread exit.

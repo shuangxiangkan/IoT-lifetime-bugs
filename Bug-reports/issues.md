@@ -29,4 +29,4 @@
  - https://github.com/wolfSSL/wolfssl/issues/10840 issue-1
 
 ## FreeRTOS-Kernel
- - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1443
+ - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1443  fixed

@@ -1,16 +1,48 @@
-# sdmmc: DMA response buffer leaked when DDR bus-mode switch fails in `sdmmc_enter_higher_speed_mode()`
+# Title
 
-## Summary
+sdmmc leaks DMA response buffer when DDR bus-mode switch fails
 
-In `components/sdmmc/sdmmc_sd.c`, `sdmmc_enter_higher_speed_mode()` allocates a
-DMA-capable response buffer for the CMD6 switch-function response and frees it at
-a shared `out:` label. Every error path in the function jumps to `out:` — except
-the UHS-I DDR50 branch, which returns directly when the host's
-`set_bus_ddr_mode()` fails, leaking the DMA buffer.
+# Answers checklist
 
-## Affected code
+- [x] I have read the documentation ESP-IDF Programming Guide and the issue is not addressed there.
+- [x] I have updated my IDF branch (master or release) to the latest version and checked that the issue is present there.
+- [x] I have searched the issue tracker for a similar issue and not found a similar issue.
 
-`components/sdmmc/sdmmc_sd.c`, `sdmmc_enter_higher_speed_mode()`:
+# IDF version
+
+`v6.1-dev-5824-gfa8039b5cad`
+
+# Espressif SoC revision
+
+Not hardware-specific. This is a source-level cleanup issue in `components/sdmmc/sdmmc_sd.c`.
+
+# Operating System used
+
+Linux x86_64. The issue was found by source inspection, not by an OS-specific build or runtime environment.
+
+# How did you build your project?
+
+Not applicable. No project build is required to observe the cleanup path in the source.
+
+# If you are using Windows, please specify command line type
+
+Not applicable.
+
+# Development Kit
+
+Not hardware-specific.
+
+# Power Supply used
+
+Not applicable.
+
+# What is the expected behavior?
+
+`sdmmc_enter_higher_speed_mode()` allocates a DMA-capable response buffer for the CMD6 switch-function response. Every error path after that allocation should release the buffer before returning.
+
+# What is the actual behavior?
+
+In `components/sdmmc/sdmmc_sd.c`, `sdmmc_enter_higher_speed_mode()` allocates `response` with `heap_caps_malloc(sizeof(*response), MALLOC_CAP_DMA)` and normally frees it at the shared `out:` label:
 
 ```c
     sdmmc_switch_func_rsp_t *response = NULL;
@@ -21,50 +53,65 @@ the UHS-I DDR50 branch, which returns directly when the host's
         return ESP_ERR_NO_MEM;
     }
     ...
+out:
+    free(response);
+    return err;
+```
+
+Most error paths in the function use `goto out;`, but the UHS-I DDR50 branch returns directly when the host driver's `set_bus_ddr_mode()` callback fails:
+
+```c
     if (((card->host.flags & SDMMC_HOST_FLAG_DDR) != 0) && (card->is_uhs1 == 1)) {
         ...
         card->is_ddr = 1;
         err = (*card->host.set_bus_ddr_mode)(card->host.slot, true);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "%s: failed to switch bus to DDR mode (0x%x)", __func__, err);
-            return err;          /* bypasses out: free(response) -> DMA buffer leaked */
+            return err;
         }
-    } else if (...) {
-        ...
     }
-
-out:
-    free(response);
-    return err;
 ```
 
-## Problem
+This direct return bypasses `out:` and leaks the DMA-capable `response` buffer.
 
-Every other failure branch in this function uses `goto out;`, which runs
-`free(response)`. The DDR50 `set_bus_ddr_mode()` failure path is the only one
-that does `return err;` directly, so `response` (allocated with `MALLOC_CAP_DMA`)
-is never freed on that path.
+# Steps to reproduce
 
-## Trigger condition
+This can be reproduced with a host callback that fails the DDR bus-mode switch:
 
-1. The SD card supports SWITCH_FUNC and DDR50.
-2. The card-side DDR50 switch (CMD6) succeeds.
-3. The host driver's `set_bus_ddr_mode(slot, true)` returns an error.
+1. Use an SD card/path where `sdmmc_enter_higher_speed_mode()` enters the UHS-I DDR50 branch:
+   - `card->host.flags` includes `SDMMC_HOST_FLAG_DDR`.
+   - `card->is_uhs1 == 1`.
+   - The card reports support for `SD_ACCESS_MODE_DDR50`.
+2. Let the card-side `sdmmc_send_cmd_switch_func(... SD_ACCESS_MODE_DDR50 ...)` call succeed.
+3. Make `card->host.set_bus_ddr_mode(card->host.slot, true)` return an error.
+4. The function returns that error directly instead of jumping to `out:`.
+5. The `response` buffer allocated with `MALLOC_CAP_DMA` is not freed.
 
-Each occurrence leaks one `sdmmc_switch_func_rsp_t` DMA buffer. DMA-capable
-memory is typically scarcer than ordinary heap, so even a small per-occurrence
-leak permanently reduces DMA memory available to other peripherals.
+Suggested verification:
 
-## Note (out of scope for this report)
+1. Provide a `set_bus_ddr_mode` stub that always returns an error.
+2. Call `sdmmc_enter_higher_speed_mode()` on the DDR50 path.
+3. Verify that the original error code is returned.
+4. Track `heap_caps_get_free_size(MALLOC_CAP_DMA)` or the relevant heap accounting across repeated calls.
+5. Before the fix, DMA-capable free memory should decrease. After the fix, it should remain stable for this path.
 
-On this path the card-side mode has already been changed to DDR50 while the
-host-side switch failed, so callers may also need to consider device-state
-rollback. This report only covers the memory leak and does not claim the
-protocol-state mismatch as a confirmed bug.
+# Debug Logs
 
-## Suggested fix
+No runtime log is available. The issue was identified by source inspection of the error path.
 
-Replace the direct return with the shared cleanup:
+The expected log line on the leaking path is:
+
+```text
+sdmmc_enter_higher_speed_mode: failed to switch bus to DDR mode (<err>)
+```
+
+# Diagnostic report archive
+
+Not available. This is a source-level cleanup issue and was not reproduced on a specific board.
+
+# More Information
+
+Replacing the direct return with the existing shared cleanup path should fix the leak:
 
 ```c
         if (err != ESP_OK) {
@@ -73,10 +120,4 @@ Replace the direct return with the shared cleanup:
         }
 ```
 
-## Suggested verification
-
-Provide a `set_bus_ddr_mode` stub that always returns an error. Verify:
-
-- The original error code is still returned.
-- `response` is freed.
-- Repeated calls do not progressively reduce `MALLOC_CAP_DMA` free space.
+There may also be a separate state consistency question because `card->is_ddr` is set before the host-side switch succeeds. This report is only about the leaked DMA response buffer.

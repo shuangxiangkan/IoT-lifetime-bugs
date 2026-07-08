@@ -1,17 +1,50 @@
-# protocomm Security1: `out`/`out_resp` leaked when `psa_cipher_update()` fails
+# Title
 
-## Summary
+protocomm Security1 leaks response objects when `psa_cipher_update()` fails
 
-In `components/protocomm/src/security/security1.c`, the Security1 session
-command-1 handler allocates two protobuf response objects (`out` and `out_resp`)
-before encrypting the device public key. If `psa_cipher_update()` fails, the
-error path frees only the cipher output buffer (`outbuf`) and returns, leaking
-both `out` and `out_resp`. They have not yet been linked into `resp`, so no
-upper-layer cleanup can reclaim them.
+# Answers checklist
 
-## Affected code
+- [x] I have read the documentation ESP-IDF Programming Guide and the issue is not addressed there.
+- [x] I have updated my IDF branch (master or release) to the latest version and checked that the issue is present there.
+- [x] I have searched the issue tracker for a similar issue and not found a similar issue.
 
-`components/protocomm/src/security/security1.c`, `handle_session_command1()`:
+# IDF version
+
+`v6.1-dev-5824-gfa8039b5cad`
+
+# Espressif SoC revision
+
+Not hardware-specific. This is a source-level resource cleanup issue in `components/protocomm/src/security/security1.c`.
+
+# Operating System used
+
+Linux x86_64. The issue was found by source inspection, not by an OS-specific build or runtime environment.
+
+# How did you build your project?
+
+Not applicable. No project build is required to observe the cleanup path in the source.
+
+# If you are using Windows, please specify command line type
+
+Not applicable.
+
+# Development Kit
+
+Not hardware-specific.
+
+# Power Supply used
+
+Not applicable.
+
+# What is the expected behavior?
+
+When `handle_session_command1()` allocates the Security1 response objects and a later error occurs, every locally-owned allocation should be released before returning an error.
+
+In particular, if the second `psa_cipher_update()` call fails, the function should free `outbuf`, `out_resp`, and `out` before returning `ESP_FAIL`.
+
+# What is the actual behavior?
+
+In `components/protocomm/src/security/security1.c`, `handle_session_command1()` allocates `out` and `out_resp`, then allocates `outbuf`. If the second `psa_cipher_update()` call fails, the error path frees only `outbuf` and returns:
 
 ```c
     Sec1Payload *out = (Sec1Payload *) malloc(sizeof(Sec1Payload));
@@ -42,46 +75,61 @@ upper-layer cleanup can reclaim them.
     if (status != PSA_SUCCESS) {
         ESP_LOGE(TAG, "Failed at psa_cipher_update with error code : %d", status);
         free(outbuf);
-        return ESP_FAIL;        /* out and out_resp leaked */
+        return ESP_FAIL;
     }
+```
 
-    out_resp->device_verify_data.data = outbuf;     /* ownership linked only here */
+At this point, `out` and `out_resp` have not yet been linked into `resp`:
+
+```c
+    out_resp->device_verify_data.data = outbuf;
     out_resp->device_verify_data.len = PUBLIC_KEY_LEN;
     ...
     out->sr1 = out_resp;
     resp->proto_case = SESSION_DATA__PROTO_SEC1;
-    resp->sec1 = out;                               /* and here */
+    resp->sec1 = out;
 ```
 
-## Problem
+Therefore `sec1_session_setup_cleanup()` cannot reclaim them. The outer request handler also returns immediately on setup failure and does not call the response cleanup function on this path.
 
-`out` and `out_resp` are only attached to the response tree *after* the
-`psa_cipher_update()` check (`out->sr1 = out_resp; resp->sec1 = out;`). On the
-encryption-failure path they are still local, unreferenced allocations, so:
+This leaks two small heap objects each time this error path is taken.
 
-- The function does not free them before returning `ESP_FAIL`.
-- The normal teardown (`sec1_session_setup_cleanup()`, which frees
-  `out_resp->device_verify_data.data`, `out_resp`, then `out`) never sees them,
-  because nothing was linked into `resp`.
+# Steps to reproduce
 
-The other two error paths in the same block (allocation failures) correctly free
-`out` and `out_resp`; only the `psa_cipher_update()` failure path omits them,
-making the inconsistency clear.
+This can be reproduced by injecting or stubbing a failure from the second `psa_cipher_update()` call in `handle_session_command1()`:
 
-## Trigger condition
+1. Start a Security1 session and reach `Session_Command1`.
+2. Let the allocations for `out`, `out_resp`, and `outbuf` succeed.
+3. Make the second `psa_cipher_update()` call return a value other than `PSA_SUCCESS`.
+4. Observe that the function frees only `outbuf` and returns `ESP_FAIL`.
+5. `out` and `out_resp` remain locally owned and are not reachable through `resp`, so they are leaked.
 
-1. A Security1 handshake reaches `Session_Command1`.
-2. All three heap allocations succeed.
-3. `psa_cipher_update()` returns something other than `PSA_SUCCESS` (invalid
-   cipher state, PSA driver error, hardware crypto failure).
+Suggested verification:
 
-Each occurrence leaks two small heap objects. A peer that can repeatedly start
-and interrupt provisioning handshakes could gradually exhaust the heap on a
-constrained device.
+1. Record `heap_caps_get_free_size(MALLOC_CAP_8BIT)` before entering this path.
+2. Inject the `psa_cipher_update()` failure.
+3. Repeat the handshake.
+4. Before the fix, free heap should trend downward. After the fix, it should remain stable for this path.
 
-## Suggested fix
+# Debug Logs
 
-Free the local objects on the failure path:
+No runtime log is available. The issue was identified by source inspection of the error path.
+
+The expected log line on the leaking path is:
+
+```text
+Failed at psa_cipher_update with error code : <status>
+```
+
+# Diagnostic report archive
+
+Not available. This is a source-level cleanup issue and was not reproduced on a specific board.
+
+# More Information
+
+The allocation failure paths in the same block already free both `out` and `out_resp`, so the missing cleanup on the `psa_cipher_update()` failure path appears inconsistent.
+
+A minimal fix is:
 
 ```c
     if (status != PSA_SUCCESS) {
@@ -93,12 +141,4 @@ Free the local objects on the failure path:
     }
 ```
 
-A single `goto cleanup` label that frees `outbuf`/`out_resp`/`out` would be more
-robust against future error branches being added.
-
-## Suggested verification
-
-Inject a single `psa_cipher_update()` failure and record
-`heap_caps_get_free_size(MALLOC_CAP_8BIT)` before and after the call. Repeat the
-handshake: before the fix the free heap trends downward; after the fix it stays
-stable.
+A shared cleanup label would also work and may be more robust if more error paths are added later.

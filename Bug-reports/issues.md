@@ -34,7 +34,7 @@
 
 ## FreeRTOS-Kernel (所有issue已经报告完)
  - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1443 issue-1 fixed
- - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1447 issue-2
+ - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1447 issue-2 confirmed
 
 ## rt-thread
  - https://github.com/RT-Thread/rt-thread/issues/11590

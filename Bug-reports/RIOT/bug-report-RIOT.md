@@ -160,19 +160,25 @@ if (stack == NULL) {
 
 ## 3. fuzzing 辅助代码中的真实泄漏
 
-### 3.1 `fuzzing_read_packet()` 没有释放输入缓冲区
+### 3.1 `fuzzing_read_bytes()` / `fuzzing_read_packet()` 输入缓冲区生命周期不完整
 
 文件：`sys/fuzzing/fuzzing.c`
 
 关键位置：
 
-- 60 行：`input = fuzzing_read_bytes(...)`
-- 65—67 行：packet 扩容失败后直接返回
+- 60 行：`fuzzing_read_packet()` 调用 `fuzzing_read_bytes(...)`
+- 65—67 行：packet 扩容失败后直接返回，没有释放 `input`
 - 69 行：把 `input` 内容复制到 `pkt->data`
-- 72 行：成功返回
+- 72 行：成功返回，也没有释放 `input`
+- 95 行：`fuzzing_read_bytes()` 循环内直接覆盖 `realloc` 返回值
+- 101—102 行：`read()` 失败路径直接返回
+- 106 行：最终缩容直接覆盖 `realloc` 返回值
 
-`fuzzing_read_bytes()` 返回堆内存，但 `fuzzing_read_packet()` 在以下两条路径
-都没有释放：
+这两处属于同一个 fuzzing input buffer 生命周期问题，适合合并成一个上游
+报告。
+
+首先，`fuzzing_read_packet()` 调用 `fuzzing_read_bytes()` 得到堆内存后，
+在以下两条路径都没有释放：
 
 ```text
 input 分配成功 -> gnrc_pktbuf_realloc_data() 失败 -> return -ENOMEM
@@ -194,23 +200,7 @@ memcpy(pkt->data, input, rsiz);
 free(input);
 ```
 
-源码注明该函数当前只能调用一次，所以泄漏通常不会无限累积，但仍会干扰
-LeakSanitizer 和长生命周期 fuzzing harness。
-
-结论：**真实但影响受限的泄漏。**
-
-### 3.2 `fuzzing_read_bytes()` 直接覆盖 `realloc` 指针
-
-文件：`sys/fuzzing/fuzzing.c`
-
-关键位置：
-
-- 84 行：初始 `realloc(NULL, rsiz)`
-- 95 行：循环内扩容
-- 101—102 行：`read()` 失败路径
-- 106 行：最终缩容
-
-循环扩容和最终缩容使用了以下模式：
+其次，`fuzzing_read_bytes()` 的循环扩容和最终缩容使用了以下模式：
 
 ```c
 if ((buffer = realloc(buffer, new_size)) == NULL) {
@@ -223,7 +213,7 @@ if ((buffer = realloc(buffer, new_size)) == NULL) {
 
 此外，`read()` 返回 `-1` 时，102 行直接返回，也没有释放当前 `buffer`。
 
-建议使用临时变量：
+建议使用临时变量并在失败时释放旧缓冲区：
 
 ```c
 uint8_t *new_buffer = realloc(buffer, new_size);
@@ -246,11 +236,14 @@ return NULL;
 
 建议验证：
 
-1. 用 allocator fault injection 分别让 95 行和 106 行的 `realloc()` 失败。
-2. 用一个会返回 `-1` 的 fd 触发 102 行。
-3. 使用 ASan/LSan 或分配计数验证所有失败路径。
+1. 用正常输入触发 `fuzzing_read_packet()` 的成功路径，确认 `input` 被释放。
+2. 让 `gnrc_pktbuf_realloc_data()` 失败，确认 `input` 被释放。
+3. 用 allocator fault injection 分别让 95 行和 106 行的 `realloc()` 失败。
+4. 用一个会返回 `-1` 的 fd 触发 102 行。
+5. 使用 ASan/LSan 或分配计数验证所有失败路径。
 
-结论：**真实泄漏，主要影响 fuzzing 工具代码。**
+结论：**真实但影响受限的泄漏，主要影响 fuzzing 工具代码；建议合并为一个
+上游报告，而不是拆成两个独立 issue。**
 
 ## 4. 测试程序中的低优先级问题
 

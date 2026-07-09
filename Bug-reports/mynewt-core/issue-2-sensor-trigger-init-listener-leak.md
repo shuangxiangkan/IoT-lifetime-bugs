@@ -1,7 +1,8 @@
-# Memory leak in `sensor_trigger_init()` when `sensor_register_listener()` fails
+# `sensor_trigger_init()` should free its listener if registration fails
 
-I found a memory leak in `sensor_trigger_init()`: the listener allocated for the
-trigger is not freed when `sensor_register_listener()` returns an error.
+I found a small cleanup issue in `sensor_trigger_init()`: the function allocates
+an internal listener for trigger notifications, but does not free it if
+`sensor_register_listener()` returns an error.
 
 File: `hw/sensor/src/sensor.c`
 
@@ -23,9 +24,10 @@ Relevant code:
     }
 ```
 
-`sensor_register_listener()` only takes ownership of the listener on success — it
-inserts it into `sensor->s_listener_list`. On failure it returns early without
-inserting or freeing:
+The ownership boundary appears to be that `sensor_register_listener()` takes
+ownership only after it successfully inserts the listener into
+`sensor->s_listener_list`. If registration fails before the insert, the listener
+is not attached to the sensor and there is no later owner that can release it:
 
 ```c
 sensor_register_listener(struct sensor *sensor, struct sensor_listener *listener)
@@ -45,9 +47,21 @@ err:
 }
 ```
 
-So when `sensor_lock()` fails (e.g. mutex timeout), `sensor_trigger_init()`
-returns on the `if (rc)` path and leaks `sensor_trig_lner`, which was never
-inserted into the listener list.
+So if `sensor_register_listener()` ever returns an error,
+`sensor_trigger_init()` returns on the `if (rc)` path and loses
+`sensor_trig_lner`.
 
-Suggested fix: free `sensor_trig_lner` before returning on the
-`sensor_register_listener()` failure path.
+This is a low-severity robustness issue. `sensor_lock()` uses
+`OS_TIMEOUT_NEVER`, so ordinary mutex contention should not make this path fail
+by timeout. The failure path is still worth cleaning up because the listener was
+allocated locally and has not been inserted into the list.
+
+A minimal fix is to free the listener before returning:
+
+```c
+    rc = sensor_register_listener(sensor, sensor_trig_lner);
+    if (rc) {
+        free(sensor_trig_lner);
+        return;
+    }
+```

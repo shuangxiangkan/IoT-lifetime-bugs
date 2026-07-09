@@ -2,7 +2,7 @@
 
 ## RT-Thread Version
 
-`v5.0.2-2673-gac6dc197a0`
+RT-Thread master (`f12485a60e`), source version `5.3.0`.
 
 ## Hardware Type/Architectures
 

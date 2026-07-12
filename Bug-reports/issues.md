@@ -33,8 +33,8 @@
  - https://github.com/contiki-ng/contiki-ng/issues/3192 issue-2
 
 ## zephyr (所有issue已经报告完)
- - https://github.com/zephyrproject-rtos/zephyr/issues/112653 issue-1 confirmed
- - https://github.com/zephyrproject-rtos/zephyr/issues/112782 issue-2 confirmed, 让提PR
+ - https://github.com/zephyrproject-rtos/zephyr/issues/112653 issue-1 fixed
+ - https://github.com/zephyrproject-rtos/zephyr/issues/112782 issue-2 fixed
 
 ## threadx (所有issue已经报告完, issue3跟issue-2有点像，可以以后再报)
  - https://github.com/eclipse-threadx/threadx/issues/568 issue-1

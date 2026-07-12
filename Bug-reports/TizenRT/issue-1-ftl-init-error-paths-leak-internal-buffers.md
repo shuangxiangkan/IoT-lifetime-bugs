@@ -5,7 +5,7 @@ structure and then, on later failure paths, free only the device structure. The
 buffers they already allocated are leaked. The two files share the same pattern,
 so they are reported together.
 
-Version checked: `926549785`
+Version checked: `926549785` (still present on current `master`)
 
 ## `ftl_nand_initialize()` leaks `block_map`
 
@@ -84,7 +84,7 @@ if (dev) {
     ret = register_blockdriver(devname, &g_bops, 0, dev);
     if (ret < 0) {
         dbg("ERROR: register_blockdriver failed: %d\n", -ret);
-        kmm_free(dev);            /* leaks dev->eblock */
+        kmm_free(dev);            /* leaks dev->eblock and the rwb buffers */
     }
 }
 ```
@@ -93,6 +93,16 @@ Under `CONFIG_FS_WRITABLE`, `dev->eblock` is allocated before the read/write
 buffer setup and before the block driver is registered. Both the
 `rwb_initialize()` failure path and the `register_blockdriver()` failure path
 free only `dev`.
+
+The leak is not limited to `eblock`. `rwb_initialize()` (in
+`os/drivers/rwbuffer.c`) can itself fail partway through: when the write buffer
+has already been allocated and the read-ahead buffer allocation then fails, it
+returns `-ENOMEM` with `rwb->wrbuffer` still allocated. Its setup comment says
+"Setup so that rwb_uninitialize can handle a failure", i.e. the caller is
+expected to call `rwb_uninitialize()` on failure — `ftl_initialize()` never
+does. Similarly, on the `register_blockdriver()` failure path the buffers
+allocated by the earlier successful `rwb_initialize()` call leak along with
+`eblock`.
 
 `register_blockdriver()` stores `dev` in `node->i_private` only on success, so on
 these failure paths ownership has not been transferred and the initialization
@@ -114,8 +124,12 @@ after they have been allocated. For `ftl_nand_initialize()`, the
 `ftl_initialize()`, the `rwb_initialize()` and `register_blockdriver()` failure
 paths should free `dev->eblock` before freeing `dev`.
 
-If `rwb_initialize()` leaves partially initialized state behind on failure, that
-should be unwound as well.
+Under `FTL_HAVE_RWBUFFER`, both of these paths should also call
+`rwb_uninitialize(&dev->rwb)`: it frees whichever rwb buffers were allocated and
+destroys the semaphores, and per the comment at the top of `rwb_initialize()` it
+is designed to be safe to call after a failed initialization. (Upstream NuttX's
+`ftl.c` already calls `rwb_uninitialize()` on its `register_blockdriver()`
+failure path.)
 
 ## Severity
 

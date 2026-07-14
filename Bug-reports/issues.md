@@ -66,14 +66,14 @@
  - https://github.com/Samsung/TizenRT/issues/7436 issue-3
 
 ## nanomq (所有issue已经报告完)
- - https://github.com/nanomq/nanomq/issues/2367 issue-1
- - https://github.com/nanomq/nanomq/issues/2366 issue-2
+ - https://github.com/nanomq/nanomq/issues/2367 issue-1 fixed
+ - https://github.com/nanomq/nanomq/issues/2366 issue-2 fixed
 
 ## neuron
  - https://github.com/emqx/neuron/issues/2899 issue-2 fixed
 
 ## connectedhomeip
- - https://github.com/project-chip/connectedhomeip/issues/73018 issue-1
+ - https://github.com/project-chip/connectedhomeip/issues/73018 issue-1 confirmed
 
 ## iotkit-embedded
  - https://github.com/aliyun/iotkit-embedded/issues/174

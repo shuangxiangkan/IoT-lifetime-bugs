@@ -1,6 +1,6 @@
 # Error-path leak in MQTT protobuf `handle_nodes_state()`
 
-I found a memory leak in the MQTT protobuf node-state reporting path when
+There is a memory leak in the MQTT protobuf node-state reporting path when
 allocating one of the per-node protobuf objects fails.
 
 Version checked: `main-daily`, commit `26d8505b`

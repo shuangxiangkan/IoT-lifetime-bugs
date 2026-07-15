@@ -1,6 +1,6 @@
 # `HAL_UDP_create()` may return a closed socket after connect failure
 
-I found a possible stale file descriptor bug in the Ubuntu HAL UDP creation
+There is a possible stale file descriptor bug in the Ubuntu HAL UDP creation
 code. If a UDP socket is created successfully but `connect()` fails, the socket
 is closed, but the local `socket_id` variable is not reset before the function
 returns.

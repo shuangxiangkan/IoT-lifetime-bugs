@@ -1,6 +1,6 @@
 # Socket leak in `neu_conn_eth_check_interface()` on `ioctl()` failure
 
-I found a socket fd leak in `neu_conn_eth_check_interface()` when the interface
+There is a socket fd leak in `neu_conn_eth_check_interface()` when the interface
 hardware-address lookup fails.
 
 Version checked: `main-daily`, commit `26d8505b`

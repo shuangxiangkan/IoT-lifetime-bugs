@@ -70,9 +70,9 @@
  - https://github.com/nanomq/nanomq/issues/2366 issue-2 fixed
 
 ## neuron (所有issue已经报告完)
- - https://github.com/emqx/neuron/issues/2904 issue-1
+ - https://github.com/emqx/neuron/issues/2904 issue-1 fixed
  - https://github.com/emqx/neuron/issues/2899 issue-2 fixed
- - https://github.com/emqx/neuron/issues/2905 issue-3
+ - https://github.com/emqx/neuron/issues/2905 issue-3 fixed
 
 ## connectedhomeip (所有issue已经报告完)
  - https://github.com/project-chip/connectedhomeip/issues/73018 issue-1 fixed

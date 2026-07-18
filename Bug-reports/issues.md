@@ -43,11 +43,11 @@
 
 ## FreeRTOS-Kernel (所有issue已经报告完)
  - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1443 issue-1 fixed
- - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1447 issue-2 confirmed
+ - https://github.com/FreeRTOS/FreeRTOS-Kernel/issues/1447 issue-2 fixed
 
 ## rt-thread (所有issue已经报告完)
  - https://github.com/RT-Thread/rt-thread/issues/11590
- - https://github.com/RT-Thread/rt-thread/issues/11604 confirmed
+ - https://github.com/RT-Thread/rt-thread/issues/11604 fixed
  - https://github.com/RT-Thread/rt-thread/issues/11605
 
 ## mynewt-nimble (所有issue已经报告完)
